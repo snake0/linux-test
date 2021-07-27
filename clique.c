@@ -19,8 +19,7 @@
 #include <asm/smp.h>
 #include <linux/random.h>
 #include <linux/sched.h>
-#include <linux/jiffies.h>
-#include <linux/time.h>
+#include <linux/ktime.h>
 
 // #define for_each_sibling(s, cpu) \
 //     for_each_cpu(s, cpu_sibling_mask(cpu))
@@ -424,25 +423,49 @@ void clique_analysis(void) {
 		clique_analysis_process(pi);
 	}
 }
+#define USE_IPI
 
-void f(void *data) {
-    int a = (int) data;
-
+void p(void *s) {
+    int k;
+    for (k=0;k<10000;++k)
+        default_matrix[(int)s]++;
 }
 
+int f(void *data) {
+    int i = (int) data,k;
+    ktime_t start = ktime_get(), stop;
+    uint64_t t;
+#ifdef USE_IPI
+    smp_call_function_single(0, p, (void *)i, 0);
+#else
+    for (k=0;k<10000;++k)
+        default_matrix[i]++;
+#endif
+    stop = ktime_get();
+    t=ktime_to_us(ktime_sub(stop, start))/ USEC_PER_MSEC;
+    printk(KERN_ERR "Time used %llu", t);
+    return 0;
+}
+
+int m[NTHREADS*NTHREADS];
+
 int init_module(void) {
-    struct timespec
-    int i;
+    struct task_struct *task;
 
-    for (i = 0; i < 16; ++i) {
-        
+    int i, k;
+
+    for (i = 1; i < 2; ++i) {
+        task = kthread_create_on_node(f, (void *) i, cpu_to_node(i), "thread%d", i);
+        kthread_bind(task,i);
+        wake_up_process(task);
     }
 
-    for (i = 0; i < 10000; ++i) {
-        smp_call_function_single(1, f, NULL, 0);
+    for (k=0;k<100000;++k) {
+        for (i = 1; i < 2; ++i) {
+            m[i] = default_matrix[i];
+        }
     }
-    stop = jiffies;
-    printk(KERN_ERR "%f", (double)(stop-start)/HZ);
+
     // int i;
     // init_scheduler();
     // insert_process("stress-ng", 1112);
