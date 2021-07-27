@@ -425,25 +425,43 @@ void clique_analysis(void) {
 }
 #define USE_IPI
 
+#define IT 1000000
+
 void p(void *s) {
     int k;
-    for (k=0;k<10000;++k)
-        default_matrix[(int)s]++;
+    for (k=0;k<IT;++k) {
+        default_matrix[(int)s] = default_matrix[(int)s] * default_matrix[(int)s];
+        default_matrix[(int) s] /= (default_matrix[(int) s]/2);
+        default_matrix[(int) s] *= 2;
+    }
 }
 
+
 int f(void *data) {
-    int i = (int) data,k;
-    ktime_t start = ktime_get(), stop;
+    int i = (int) data,k,m;
+    void *s;
+    struct timespec start, stop;
     uint64_t t;
+    for (m = 0; m < 10; ++m) {
+        // init_random(default_matrix);
+        getnstimeofday(&start);
+
 #ifdef USE_IPI
-    smp_call_function_single(0, p, (void *)i, 0);
+        smp_call_function_single(0, p, (void *)i, 0);
 #else
-    for (k=0;k<10000;++k)
-        default_matrix[i]++;
+        s = data;
+        for (k=0;k<IT;++k){
+            default_matrix[(int)s] = default_matrix[(int)s] * default_matrix[(int)s];
+            default_matrix[(int) s] /= (default_matrix[(int) s]/2);
+            default_matrix[(int) s] *= 2;
+        }
 #endif
-    stop = ktime_get();
-    t=ktime_to_us(ktime_sub(stop, start))/ USEC_PER_MSEC;
-    printk(KERN_ERR "Time used %llu", t);
+        getnstimeofday(&stop);
+        t = stop.tv_nsec - start.tv_nsec;
+        
+        printk(KERN_ERR "Time used %d %llu",m, t);
+        usleep_range(1000000, 1000001);
+    }
     return 0;
 }
 
@@ -454,13 +472,15 @@ int init_module(void) {
 
     int i, k;
 
+    set_affinity(current->pid, 0);
+
     for (i = 1; i < 2; ++i) {
         task = kthread_create_on_node(f, (void *) i, cpu_to_node(i), "thread%d", i);
         kthread_bind(task,i);
         wake_up_process(task);
     }
 
-    for (k=0;k<100000;++k) {
+    for (k=0;k<1000000;++k) {
         for (i = 1; i < 2; ++i) {
             m[i] = default_matrix[i];
         }
