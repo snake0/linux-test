@@ -24,18 +24,6 @@
 #include <linux/sched.h>
 #include <linux/sort.h>
 #include <linux/random.h>
-#include <linux/smp.h>
-
-static inline struct cpumask *cpu_core_mask(int cpu)
-{
-	return per_cpu(cpu_core_map, cpu);
-}
-
-static inline struct cpumask *cpu_sibling_mask(int cpu)
-{
-	return per_cpu(cpu_sibling_map, cpu);
-}
-
 
 #define for_each_sibling(s, cpu) \
     for_each_cpu(s, cpu_sibling_mask(cpu))
@@ -489,12 +477,12 @@ int __init init_clique_scheduler(void) {
     printk(KERN_ERR "CLIQUE init!");
 #endif
 
-    if (!balancer) {
-        balancer = kthread_create_on_node(
-            balancer_func, NULL, cpu_to_node(num_threads - 1), "clique-scheduler");
-        kthread_bind(balancer, num_threads - 1);
-        wake_up_process(balancer);
-    }
+    // if (!balancer) {
+    //     balancer = kthread_create_on_node(
+    //         balancer_func, NULL, cpu_to_node(num_threads - 1), "clique-scheduler");
+    //     kthread_bind(balancer, num_threads - 1);
+    //     wake_up_process(balancer);
+    // }
     return 0;
 }
 
