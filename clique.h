@@ -1,25 +1,19 @@
-#ifndef __CLIQUE_H__
-#define __CLIQUE_H__
+#ifndef __LINUX_CLIQUE_H__
+#define __LINUX_CLIQUE_H__
 
-#include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/compiler.h>
-#include <linux/list.h>
-#include <linux/mm.h>
-#include <linux/module.h>
-#include <linux/slab.h>
-#include <linux/string.h>
+
 #include <linux/hashtable.h>
+#include <linux/string.h>
 #include <linux/sched.h>
+#include <linux/rwlock.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
 
-#include <asm/pgtable.h>
-#include <asm/uaccess.h>
-#include <asm/kvm_para.h>
 
 
-#define NTHREADS_SHIFT 6UL
+#define NTHREADS_SHIFT 5UL
 #define NTHREADS (1 << NTHREADS_SHIFT)
-#define SUBSCRIPT(x,y) (((x) << NTHREADS_SHIFT) + (y))
+#define SUBSCRIPT(x, y) (((x) << NTHREADS_SHIFT) + (y))
 #define C_PRINT
 #define VALID_ONLY
 
@@ -37,6 +31,11 @@
 		if (unlikely(!(v))) {								\
 			printk(KERN_ERR "C_ASSERT failed in %s at %d", __FUNCTION__, __LINE__);\
 		}																		\
+	}
+
+#define C_LOG(s)	\
+	{\
+		printk(KERN_ERR "C_LOG: %s, %s at %d", (s), __FUNCTION__, __LINE__);\
 	}
 
 struct clique {
@@ -62,6 +61,7 @@ struct process_info {
 	// for memory accesses
 	int matrix[NTHREADS * NTHREADS];
 	struct mem_acc *mcs;
+	int sum, last_sum;
 
 	// for clique computation
 	int scope;
@@ -90,19 +90,27 @@ extern struct process_info process_list;
 static inline
 int check_name(char *comm) {
 	int len = strlen(comm);
-	if (unlikely(comm[len - 2] == '.' && comm[len - 1] == 'x'))
+	if (unlikely(!strcmp(comm, "sysbench")))
 		return 1;
 	return 0;
 }
 
+static inline
+void reset_matrix(int *matrix) {
+    memset(matrix, 0, sizeof(int) << (2 * NTHREADS_SHIFT));
+}
 
 static inline
 void reset_process_info(struct process_info *pi) {
 	C_ASSERT(pi);
-	memset(pi->matrix, 0, sizeof(pi->matrix));
+	reset_matrix(pi->matrix);
 	memset(pi->pids, -1, sizeof(pi->pids));
 	memset(pi->mcs, -1, sizeof(struct mem_acc) << MEM_HASH_BITS);
 	atomic_set(&pi->nthreads, 0);
+
+#ifdef C_PRINT
+	C_LOG(pi->comm);
+#endif
 }
 
 static inline
@@ -171,6 +179,12 @@ void insert_process(char *comm, int pid) {
 	pi->mcs = (struct mem_acc *) vmalloc(sizeof(struct mem_acc) << MEM_HASH_BITS);
 	C_ASSERT(pi->mcs);
 	memset(pi->mcs, -1, sizeof(struct mem_acc) << MEM_HASH_BITS);
+
+	pi->last_sum = 0;
+
+#ifdef C_PRINT
+	C_LOG(comm);
+#endif
 }
 
 static inline
@@ -199,8 +213,13 @@ void insert_thread(char *comm, int pid) {
 
 	pi->pids[tid] = pid;
 	thread_list[h].tid = tid;
+
+#ifdef C_PRINT
+	C_LOG(comm);
+#endif
 }
 
+static inline
 void remove_thread(char *comm, int pid) {
 	int h = hash_32(pid, PID_HASH_BITS);
 	short tid;
@@ -232,6 +251,10 @@ void remove_thread(char *comm, int pid) {
 	if (unlikely(tid == 0)) {
 		reset_process_info(pi);
 	}
+
+#ifdef C_PRINT
+	C_LOG(comm);
+#endif
 }
 
 
@@ -265,7 +288,7 @@ void record_access(int pid, unsigned long address) {
   short tid = thread_list[h].tid;
   struct mem_acc *mc;
 
-	if (!pi) {
+	if (likely(!pi)) {
 		return;
 	}
   mc = &pi->mcs[hash_32(PN(address), MEM_HASH_BITS)];

@@ -12,26 +12,42 @@
  * the COPYING file in the top-level directory.
  */
 
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
 #include "clique.h"
-#include <linux/cpu.h>
+
+#include <linux/compiler.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
-#include <asm/smp.h>
-#include <linux/random.h>
+#include <linux/cpu.h>
 #include <linux/sched.h>
-#include <linux/ktime.h>
+#include <linux/sort.h>
+#include <linux/random.h>
+#include <linux/smp.h>
 
-// #define for_each_sibling(s, cpu) \
-//     for_each_cpu(s, cpu_sibling_mask(cpu))
-// #define for_each_core(s, cpu) \
-//     for_each_cpu(s, cpu_core_mask(cpu))
-// #define for_each_node_cpu(s, node) \
-//     for_each_cpu(s, cpumask_of_node(node))
+static inline struct cpumask *cpu_core_mask(int cpu)
+{
+	return per_cpu(cpu_core_map, cpu);
+}
+
+static inline struct cpumask *cpu_sibling_mask(int cpu)
+{
+	return per_cpu(cpu_sibling_map, cpu);
+}
+
+
+#define for_each_sibling(s, cpu) \
+    for_each_cpu(s, cpu_sibling_mask(cpu))
+#define for_each_core(s, cpu) \
+    for_each_cpu(s, cpu_core_mask(cpu))
+#define for_each_node_cpu(s, node) \
+    for_each_cpu(s, cpumask_of_node(node))
 
 static int num_cpus = 0, 
     num_cores = 0, num_threads = 0;
 
-static int num_nodes = 2, cores_per_node = 8;
+static int num_nodes = 0, cores_per_node = 0;
 
 struct c_thread_info thread_list[1UL << PID_HASH_BITS];
 struct process_info process_list;
@@ -45,67 +61,66 @@ int threads_chosen[NTHREADS];
 // communication rates between threads
 int default_matrix[NTHREADS * NTHREADS] = {
     0,  12, 5,  3,  0,  1,  1,  1,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  1, 0, 0, 0, 1,  0,  0,  0,  0,  1,  0,  1,  4,  11,
-    12, 0,  12, 2,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  1,  0,  1,  0,
-    5,  12, 0,  12, 1,  4,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  1,  1,
+    12, 0,  12, 2,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  1,  0,  1,  0, 
+    5,  12, 0,  12, 1,  4,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  1,  1, 
     3,  2,  12, 0,  5,  1,  1,  1,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  1,  0,  0,  1,
     0,  0,  1,  5,  0,  10, 0,  1,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
     1,  0,  4,  1,  10, 0,  15, 3,  1, 0,  2,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
     1,  0,  0,  1,  0,  15, 0,  18, 0, 1,  1,  0,  0,  1,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    1,  0,  0,  1,  1,  3,  18, 0,  8, 3,  2,  2,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  1,  0,  8,  0, 6,  3,  2,  0,  0,  0, 1,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  1,  3,  6, 0,  12, 2,  1,  2,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  2,  1,  2,  3, 12, 0,  10, 1,  1,  0, 1,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  2,  2, 2,  10, 0,  8,  3,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 1,  1,  8,  0,  16, 1, 3,  3,  0,  1, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  1,  0,  0, 2,  1,  3,  16, 0,  6, 2,  3,  1,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    1,  0,  0,  1,  1,  3,  18, 0,  8, 3,  2,  2,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  1,  0,  8,  0, 6,  3,  2,  0,  0,  0, 1,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  1,  3,  6, 0,  12, 2,  1,  2,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  2,  1,  2,  3, 12, 0,  10, 1,  1,  0, 1,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  2,  2, 2,  10, 0,  8,  3,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 1,  1,  8,  0,  16, 1, 3,  3,  0,  1, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  1,  0,  0, 2,  1,  3,  16, 0,  6, 2,  3,  1,  0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
     0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  1,  6,  0, 8,  0,  0,  2, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  1, 0,  1,  0,  3,  2,  8, 0,  11, 1,  0, 0, 0, 1, 1,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  3,  3,  0, 11, 0,  12, 5, 1, 2, 0, 0,  0,  1,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  1,  0, 1,  12, 0,  9, 0, 1, 1, 1,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  1,  0,  2, 0,  5,  9,  0, 7, 5, 0, 1,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  1,  0,  7, 0, 7, 1, 0,  0,  3,  0,  0,  0,  1,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  2,  1,  5, 7, 0, 9, 1,  2,  2,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 1,  0,  1,  0, 1, 9, 0, 8,  0,  2,  0,  0,  0,  0,  0,  0,  0,
-    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 1,  0,  1,  1, 0, 1, 8, 0,  10, 3,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 2, 0, 10, 0,  14, 2,  0,  1,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  1,  0,  0, 3, 2, 2, 3,  14, 0,  12, 0,  1,  2,  2,  0,  2,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  2,  12, 0,  16, 2,  2,  2,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  16, 0,  5,  1,  1,  0,  0,
-    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  1,  1,  2,  5,  0,  10, 4,  4,  1,
-    0,  1,  0,  1,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 1, 0, 0, 0,  0,  2,  2,  1,  10, 0,  10, 1,  1,
-    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  2,  2,  1,  4,  10, 0,  15, 2,
-    4,  1,  1,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  4,  1,  15, 0,  13,
+    0,  0,  0,  0,  0,  0,  0,  0,  1, 0,  1,  0,  3,  2,  8, 0,  11, 1,  0, 0, 0, 1, 1,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  3,  3,  0, 11, 0,  12, 5, 1, 2, 0, 0,  0,  1,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  1,  0, 1,  12, 0,  9, 0, 1, 1, 1,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  1,  0,  2, 0,  5,  9,  0, 7, 5, 0, 1,  0,  0,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  1,  0,  7, 0, 7, 1, 0,  0,  3,  0,  0,  0,  1,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  2,  1,  5, 7, 0, 9, 1,  2,  2,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 1,  0,  1,  0, 1, 9, 0, 8,  0,  2,  0,  0,  0,  0,  0,  0,  0, 
+    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 1,  0,  1,  1, 0, 1, 8, 0,  10, 3,  0,  0,  0,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 2, 0, 10, 0,  14, 2,  0,  1,  0,  0,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  1,  0,  0, 3, 2, 2, 3,  14, 0,  12, 0,  1,  2,  2,  0,  2, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  2,  12, 0,  16, 2,  2,  2,  0,  0, 
+    0,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  16, 0,  5,  1,  1,  0,  0, 
+    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  1,  1,  2,  5,  0,  10, 4,  4,  1, 
+    0,  1,  0,  1,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 1, 0, 0, 0,  0,  2,  2,  1,  10, 0,  10, 1,  1, 
+    1,  0,  0,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  2,  2,  1,  4,  10, 0,  15, 2, 
+    4,  1,  1,  0,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  0,  0,  0,  4,  1,  15, 0,  13, 
     11, 0,  1,  1,  0,  0,  0,  0,  0, 0,  0,  0,  0,  0,  0, 0,  0,  0,  0, 0, 0, 0, 0,  0,  2,  0,  0,  1,  1,  2,  13, 0
 };
 
 // Processor topology
-// static void detect_topology(void) {
-//   int node, cpu, core, thread;
-//   if (num_nodes)
-//     return;
+static void detect_topology(void) {
+  int node, cpu, core, thread;
+  if (num_nodes)
+    return;
 
-//   for_each_online_node(node) {
-//     ++num_nodes;
-//     for_each_node_cpu(cpu, node) {
-//       ++num_cpus;
-//       for_each_core(core, cpu) {
-//         ++num_cores;
-//         for_each_sibling(thread, core) {
-//           ++num_threads;
-//         }
-//       }
-//     }
-//   }
-// #ifdef C_PRINT
-//   printk(KERN_INFO
-//            "topology: %d nodes, %d cpus, %d cores, %d threads",
-//            num_nodes, num_cpus, num_cores, num_threads);
-// #endif
-//   cores_per_node = num_threads / num_nodes;
-// }
+  for_each_online_node(node) {
+    ++num_nodes;
+    for_each_node_cpu(cpu, node) {
+      ++num_cpus;
+      for_each_core(core, cpu) {
+        ++num_cores;
+        for_each_sibling(thread, core) {
+          ++num_threads;
+        }
+      }
+    }
+  }
+#ifdef C_PRINT
+  printk(KERN_INFO
+           "topology: %d nodes, %d cpus, %d cores, %d threads",
+           num_nodes, num_cpus, num_cores, num_threads);
+#endif
+  cores_per_node = num_threads / num_nodes;
+}
 
 void init_scheduler(void) {
-    // detect_topology();
     INIT_LIST_HEAD(&process_list.list);
     process_list.comm[0] = '\0';
     memset(thread_list, 0, sizeof(thread_list));
@@ -301,7 +316,7 @@ struct clique *get_first_valid(struct process_info *pi) {
 }
 
 struct clique *find_neighbor(struct clique *c1, struct process_info *pi) {
-    struct clique *c2, *temp = pi->cliques;
+    struct clique *c2 = NULL, *temp = pi->cliques;
     int distance = -1, temp_int;
     while (temp < pi->cliques + pi->scope) {
         if (temp != c1 && temp->flag == C_VALID) {
@@ -357,6 +372,16 @@ void init_random(int *matrix) {
     }
 }
 
+int sum_matrix(int *matrix) {
+    int ret = 0, i, j;
+    for (i = 0; i < NTHREADS; ++i) {
+        for (j = 0; j < i; ++j) {
+            ret += matrix[SUBSCRIPT(i, j)];
+        }
+    }
+    return ret;
+}
+
 // void assign_cpus_for_clique(struct clique *c, int node) {
 //     int cpu_curr = cores_per_node * node, size = c->size, *pids = c->pids, i;
 //     for (i = 0; i < size; ++i) {
@@ -384,15 +409,7 @@ void init_random(int *matrix) {
 
 void clique_analysis_process(struct process_info *pi) {
     struct clique *c1, *c2;
-    
-    init_cliques(pi);
-    if (!strcmp("sysbench", pi->comm))
-        init_matrix(pi->matrix);
-    else
-        init_random(pi->matrix);
-
 #ifdef C_PRINT
-    print_matrix(pi->matrix, pi->scope);
     print_cliques(pi);
 #endif
 
@@ -414,99 +431,86 @@ void clique_analysis_process(struct process_info *pi) {
     // calculate_threads_chosen();
 }
 
-void clique_analysis(void) {
+// main scheduler thread
+static int balancer_func(void *v) {
+    int sleep_time = 500;
     struct process_info *pi = NULL;
 	struct list_head *curr;
-	
-	list_for_each(curr, &process_list.list) {
-		pi = list_entry(curr, struct process_info, list);
-		clique_analysis_process(pi);
-	}
-}
-#define USE_IPI
+    int i;
 
-#define IT 1000000
+    init_scheduler();
 
-void p(void *s) {
-    int k;
-    for (k=0;k<IT;++k) {
-        default_matrix[(int)s] = default_matrix[(int)s] * default_matrix[(int)s];
-        default_matrix[(int) s] /= (default_matrix[(int) s]/2);
-        default_matrix[(int) s] *= 2;
+    insert_process("stress-ng", 1112);
+    for (i=1113;i<1113+20;++i) {
+        insert_thread("stress-ng",i);
     }
-}
 
+    insert_process("sysbench", 1143);
+    for (i=1144;i<1144+20;++i) {
+        insert_thread("sysbench",i);
+    }
 
-int f(void *data) {
-    int i = (int) data,k,m;
-    void *s;
-    struct timespec start, stop;
-    uint64_t t;
-    for (m = 0; m < 10; ++m) {
-        // init_random(default_matrix);
-        getnstimeofday(&start);
-
-#ifdef USE_IPI
-        smp_call_function_single(0, p, (void *)i, 0);
-#else
-        s = data;
-        for (k=0;k<IT;++k){
-            default_matrix[(int)s] = default_matrix[(int)s] * default_matrix[(int)s];
-            default_matrix[(int) s] /= (default_matrix[(int) s]/2);
-            default_matrix[(int) s] *= 2;
-        }
+#ifdef C_PRINT
+    printk(KERN_ERR "CLIQUE thread is up");
 #endif
-        getnstimeofday(&stop);
-        t = stop.tv_nsec - start.tv_nsec;
-        
-        printk(KERN_ERR "Time used %d %llu",m, t);
-        usleep_range(1000000, 1000001);
-    }
-    return 0;
-}
+    msleep_interruptible(sleep_time);
+    while (!kthread_should_stop()) {
+        set_current_state(TASK_INTERRUPTIBLE);
 
-int m[NTHREADS*NTHREADS];
+        list_for_each(curr, &process_list.list) {
+            pi = list_entry(curr, struct process_info, list);
+            init_matrix(pi->matrix);
+            init_cliques(pi);
 
-int init_module(void) {
-    struct task_struct *task;
-
-    int i, k;
-
-    set_affinity(current->pid, 0);
-
-    for (i = 1; i < 2; ++i) {
-        task = kthread_create_on_node(f, (void *) i, cpu_to_node(i), "thread%d", i);
-        kthread_bind(task,i);
-        wake_up_process(task);
-    }
-
-    for (k=0;k<1000000;++k) {
-        for (i = 1; i < 2; ++i) {
-            m[i] = default_matrix[i];
+            // clique_analysis_process(pi);
+            pi->sum = sum_matrix(pi->matrix);
+#ifdef C_PRINT
+            if (pi->scope) {
+                printk(KERN_ERR "Matrix of Process %s with diff %d",
+                    pi->comm, pi->sum - pi->last_sum);
+                print_matrix(pi->matrix, pi->scope);
+            }
+#endif
+            pi->last_sum = pi->sum;
         }
+        msleep_interruptible(sleep_time);
     }
 
-    // int i;
-    // init_scheduler();
-    // insert_process("stress-ng", 1112);
-    // for (i=1113;i<1113+30;++i) {
-    //     insert_thread("stress-ng",i);
-    // }
-
-    // insert_process("sysbench", 1143);
-    // for (i=1144;i<1144+30;++i) {
-    //     insert_thread("sysbench",i);
-    // }
-
-    
-
-    // print_processes();
-    // clique_analysis();
-    // exit_scheduler();
+    exit_scheduler();
     return 0;
 }
 
-void cleanup_module(void) {}
+static struct task_struct *balancer = NULL;
 
+int __init init_clique_scheduler(void) {
+    detect_topology();
+
+#ifdef C_PRINT
+    printk(KERN_ERR "CLIQUE init!");
+#endif
+
+    if (!balancer) {
+        balancer = kthread_create_on_node(
+            balancer_func, NULL, cpu_to_node(num_threads - 1), "clique-scheduler");
+        kthread_bind(balancer, num_threads - 1);
+        wake_up_process(balancer);
+    }
+    return 0;
+}
+
+void __exit cleanup_clique_scheduler(void) {
+    if (balancer) {
+        kthread_stop(balancer);
+        balancer = NULL;
+#ifdef C_PRINT
+        printk(KERN_ERR "CLIQUE thread is down");
+#endif
+    }
+}
+
+module_init(init_clique_scheduler);
+module_exit(cleanup_clique_scheduler);
+MODULE_AUTHOR("Xingguo Jia <jiaxg1998@sjtu.edu.cn>");
+MODULE_DESCRIPTION("CLIQUE Scheduler as a Driver");
 MODULE_LICENSE("GPL");
 
