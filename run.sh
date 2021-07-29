@@ -1,7 +1,13 @@
 #!/bin/bash
 make clean
 make debug
-sudo rmmod clique.ko
 
-sudo insmod clique.ko
+sudo dmesg --clear
+sudo rmmod lkm.ko
 
+sudo insmod lkm.ko
+
+sleep 4
+
+clear
+dmesg --notime

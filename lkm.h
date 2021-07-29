@@ -23,6 +23,8 @@
 #define MEM_HASH_SIZE (1UL << MEM_HASH_BITS)
 #define PN(addr) ((addr) >> 12UL)
 
+#define C_IPI
+
 
 //#define C_USEMAX
 
@@ -96,14 +98,9 @@ int check_name(char *comm) {
 }
 
 static inline
-void reset_matrix(int *matrix) {
-    memset(matrix, 0, sizeof(int) << (2 * NTHREADS_SHIFT));
-}
-
-static inline
 void reset_process_info(struct process_info *pi) {
 	C_ASSERT(pi);
-	reset_matrix(pi->matrix);
+	memset(pi->matrix, 0, sizeof(int) << (2 * NTHREADS_SHIFT));
 	memset(pi->pids, -1, sizeof(pi->pids));
 	memset(pi->mcs, -1, sizeof(struct mem_acc) << MEM_HASH_BITS);
 	atomic_set(&pi->nthreads, 0);
