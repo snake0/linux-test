@@ -299,7 +299,23 @@ void merge_clique(struct clique *c1, struct clique *c2, struct process_info *pi)
             }
         }
     } else {
-        printk("merge_clique: NULL pointer\n");
+        if (c1 && c1->flag == C_VALID) {
+#ifdef C_PRINT
+            printk("Merging: ");
+            print_clique(c1);
+#endif
+            c1->flag = C_REUSE;
+            pi->cliques_size--;
+        } else if (c2 && c2->flag == C_VALID) {
+#ifdef C_PRINT
+            printk("Merging: ");
+            print_clique(c2);
+#endif
+            c2->flag = C_REUSE;
+            pi->cliques_size--;
+        } else {
+            C_LOG("both NULL pointer");
+        }
     }
 }
 
@@ -318,6 +334,11 @@ struct clique *get_first_valid(struct process_info *pi) {
 struct clique *find_neighbor(struct clique *c1, struct process_info *pi) {
     struct clique *c2 = NULL, *temp = pi->cliques;
     int distance = -1, temp_int;
+
+    if (unlikely(pi->cliques_size == 1)) {
+        return NULL;
+    }
+
     while (temp < pi->cliques + pi->scope) {
         if (temp != c1 && temp->flag == C_VALID) {
             temp_int = clique_distance(c1, temp, pi->matrix);
@@ -409,6 +430,8 @@ int sum_matrix(int *matrix) {
 
 void clique_analysis_process(struct process_info *pi) {
     struct clique *c1, *c2;
+    init_cliques(pi);
+
 #ifdef C_PRINT
     print_cliques(pi);
 #endif
@@ -420,6 +443,7 @@ void clique_analysis_process(struct process_info *pi) {
             merge_clique(c1, c2, pi);
         }
         reset_cliques(pi);
+               
 
 #ifdef C_PRINT
         printk(KERN_ERR "cliques:");
@@ -441,12 +465,12 @@ static int balancer_func(void *v) {
     init_scheduler();
 
     insert_process("stress-ng", 1112);
-    for (i=1113;i<1113+20;++i) {
+    for (i=1113;i<1113+31;++i) {
         insert_thread("stress-ng",i);
     }
 
-    insert_process("sysbench", 1143);
-    for (i=1144;i<1144+20;++i) {
+    insert_process("sysbench", 1999);
+    for (i=2000;i<2000+31;++i) {
         insert_thread("sysbench",i);
     }
 
@@ -460,12 +484,11 @@ static int balancer_func(void *v) {
         list_for_each(curr, &process_list.list) {
             pi = list_entry(curr, struct process_info, list);
             init_matrix(pi->matrix);
-            init_cliques(pi);
 
-            // clique_analysis_process(pi);
             pi->sum = sum_matrix(pi->matrix);
 #ifdef C_PRINT
             if (pi->scope) {
+                clique_analysis_process(pi);
                 printk(KERN_ERR "Matrix of Process %s with diff %d",
                     pi->comm, pi->sum - pi->last_sum);
                 print_matrix(pi->matrix, pi->scope);
@@ -480,7 +503,39 @@ static int balancer_func(void *v) {
     return 0;
 }
 
+static int f1(void *v) {
+    while (!kthread_should_stop()) {
+        
+    }
+    return 0;
+}
+
+static int f2(void *v) {
+    while (!kthread_should_stop()) {
+        msleep_interruptible(100);
+    }
+    return 0;
+}
+
+static int f3(void *v) {
+    while (!kthread_should_stop()) {
+        msleep_interruptible(1000);
+    }
+    return 0;
+}
+
 static struct task_struct *balancer = NULL;
+
+static struct task_struct *kthread_run_on_cpu(int (*threadfn)(void *data),
+					  void *data,
+					  unsigned int cpu,
+					  const char *namefmt) {
+    struct task_struct *ret = kthread_create_on_node(
+            balancer_func, NULL, cpu_to_node(cpu), namefmt);
+    kthread_bind(ret, cpu);
+    wake_up_process(ret);
+    return ret;
+}
 
 int __init init_clique_scheduler(void) {
     detect_topology();
@@ -488,13 +543,20 @@ int __init init_clique_scheduler(void) {
 #ifdef C_PRINT
     printk(KERN_ERR "CLIQUE init!");
 #endif
+    // if (!balancer) {
+        // kthread_create_on_cpu(balancer_func, NULL, num_threads - 1, 
+            // "clique-scheduler");
+    // }
+    // if (!balancer) {
+    //     balancer = kthread_create_on_node(
+    //         balancer_func, NULL, cpu_to_node(num_threads - 1), "clique-scheduler");
+    //     kthread_bind(balancer, num_threads - 1);
+    //     wake_up_process(balancer);
+    // }
+    balancer = kthread_run_on_cpu(f1, NULL, 0, "f1");
+    msleep_interruptible(20000);
+    kthread_stop(balancer);
 
-    if (!balancer) {
-        balancer = kthread_create_on_node(
-            balancer_func, NULL, cpu_to_node(num_threads - 1), "clique-scheduler");
-        kthread_bind(balancer, num_threads - 1);
-        wake_up_process(balancer);
-    }
     return 0;
 }
 
