@@ -509,6 +509,27 @@ static int balancer_func(void *v) {
     return 0;
 }
 
+static int f1(void *v) {
+    for (;;) {
+        msleep(10);
+    }
+    return 0;
+}
+
+static int f2(void *v) {
+    while (!kthread_should_stop()) {
+        msleep_interruptible(100);
+    }
+    return 0;
+}
+
+static int f3(void *v) {
+    while (!kthread_should_stop()) {
+        msleep_interruptible(1000);
+    }
+    return 0;
+}
+
 static struct task_struct *balancer = NULL;
 
 static struct task_struct *kthread_run_on_cpu(int (*threadfn)(void *data),
