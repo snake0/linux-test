@@ -492,8 +492,8 @@ static int balancer_func(void *v) {
 }
 
 static int f1(void *v) {
-    while (!kthread_should_stop()) {
-        
+    for (;;) {
+        msleep(10);
     }
     return 0;
 }
