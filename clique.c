@@ -24,18 +24,6 @@
 #include <linux/sched.h>
 #include <linux/sort.h>
 #include <linux/random.h>
-#include <linux/smp.h>
-
-static inline struct cpumask *cpu_core_mask(int cpu)
-{
-	return per_cpu(cpu_core_map, cpu);
-}
-
-static inline struct cpumask *cpu_sibling_mask(int cpu)
-{
-	return per_cpu(cpu_sibling_map, cpu);
-}
-
 
 #define for_each_sibling(s, cpu) \
     for_each_cpu(s, cpu_sibling_mask(cpu))
