@@ -626,12 +626,12 @@ void assign_cpus_for_clique(struct clique *c, int node, struct process_info *pi)
     }
 }
 
-void calculate_threads_chosen(struct process_info *pi) {
+void calculate_threads_chosen(struct process_info *pi, int start_node) {
     int i, node = 0;
     struct clique *cliques = pi->cliques;
     for (i = 0; i < pi->scope; ++i) {
         if (cliques[i].flag == C_VALID) {
-            assign_cpus_for_clique(cliques + i, node++, pi);
+            assign_cpus_for_clique(cliques + i, start_node++, pi);
         }
     }
 #ifdef C_PRINT
@@ -668,26 +668,26 @@ void clique_analysis_process(struct process_info *pi) {
     }
 }
 
-void set_affinity_process(struct process_info *pi) {
-    struct cpumask mask;
-    int i;
+// void set_affinity_process(struct process_info *pi) {
+//     struct cpumask mask;
+//     int i;
 
-    for (i = 0; i < pi->scope; ++i) {
-        cpumask_clear(&mask);
-        cpumask_set_cpu(pi->pid_to_core[i], &mask);
-        sched_setaffinity(pi->pids[i], &mask);
-    }
-#ifdef C_PRINT
-    C_LOG("Set affinity process done");
-#endif
-}
+//     for (i = 0; i < pi->scope; ++i) {
+//         cpumask_clear(&mask);
+//         cpumask_set_cpu(pi->pid_to_core[i], &mask);
+//         sched_setaffinity(pi->pids[i], &mask);
+//     }
+// #ifdef C_PRINT
+//     C_LOG("Set affinity process done");
+// #endif
+// }
 
 // main scheduler thread
 static int balancer_func(void *v) {
     int sleep_time = 1000;
     struct process_info *pi = NULL;
 	struct list_head *curr;
-    int total_threads, matrix_diff;
+    int total_threads, matrix_diff, start_node;
 
     init_scheduler();
 
@@ -696,6 +696,7 @@ static int balancer_func(void *v) {
 #endif
     msleep_interruptible(sleep_time);
     num_nodes = 4;
+    cores_per_node = 4;
     // while (!kthread_should_stop()) {
         set_current_state(TASK_INTERRUPTIBLE);
 
@@ -706,25 +707,31 @@ static int balancer_func(void *v) {
             pi->scope = atomic_read(&pi->nthreads);
             pi->sum = sum_process_matrix(pi);
             matrix_diff = pi->sum - pi->last_sum;
-#ifdef C_PRINT
-            printk(KERN_ERR "Matrix of Process %s with diff %d",
-                pi->comm, matrix_diff);
-            print_matrix(pi->matrix, pi->scope);
-#endif
-            pi->last_sum = pi->sum;
             
             if (matrix_diff > 100) {
-                clique_analysis_process(pi);
-                calculate_threads_chosen(pi);
+                total_threads += pi->scope;
+#ifdef C_PRINT
+                printk(KERN_ERR "Matrix of Process %s with diff %d",
+                    pi->comm, matrix_diff);
+                print_matrix(pi->matrix, pi->scope);
+#endif
             }
         }
 
+        start_node = 0;
         list_for_each(curr, &process_list.list) {
             pi = list_entry(curr, struct process_info, list);
-            pi->target_cliques = num_nodes * pi->scope / total_threads;
+            matrix_diff = pi->sum - pi->last_sum;
+            if (matrix_diff > 100) {
+                pi->target_cliques = num_nodes * pi->scope / total_threads;
 #ifdef C_PRINT
-            printk(KERN_ERR "Target cliques: Process %s get %d cliques", pi->comm, pi->target_cliques);
+                printk(KERN_ERR "Target cliques: Process %s get %d cliques", pi->comm, pi->target_cliques);
 #endif
+                clique_analysis_process(pi);
+                calculate_threads_chosen(pi, start_node);
+            }
+            start_node += pi->target_cliques;
+            pi->last_sum = pi->sum;
         }
 
         msleep_interruptible(sleep_time);
