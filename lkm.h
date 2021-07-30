@@ -23,7 +23,9 @@
 #define MEM_HASH_SIZE (1UL << MEM_HASH_BITS)
 #define PN(addr) ((addr) >> 12UL)
 
-#define C_IPI
+#define SCHED_CORE 0
+
+#define C_IPI // whether use IPI
 
 
 //#define C_USEMAX
@@ -69,6 +71,10 @@ struct process_info {
 	int scope;
 	int cliques_size;
 	struct clique cliques[NTHREADS];
+
+	// for scheduling
+	int pid_to_core[NTHREADS];
+	int target_cliques;
 };
 
 struct c_thread_info {
@@ -76,8 +82,21 @@ struct c_thread_info {
 	short tid; // for indexing matrix
 };
 
+// args for smp_call_function_single
+struct execution_arg {
+	char *comm;
+	int pid;
+};
+
+struct access_arg {
+	int pid;
+	unsigned long address;
+};
+
+
 extern struct c_thread_info thread_list[PID_HASH_SIZE];
 extern struct process_info process_list;
+
 
 // static inline
 // void *resize(void *old, unsigned long old_size, unsigned long new_size) {
@@ -87,6 +106,14 @@ extern struct process_info process_list;
 // 	memset(ret + old_size, 0, new_size - old_size);
 // 	return ret;
 // }
+
+void _insert_process(void *arg);
+
+void _insert_thread(void *arg);
+
+void _remove_thread(void *arg);
+
+void _record_access(void *arg);
 
 // called before insert_process & insert_thread
 static inline
@@ -124,133 +151,51 @@ struct process_info *search_process_info(char *comm) {
 	return NULL;
 }
 
-// TODO: concurrently inserting processes
 static inline
 void insert_process(char *comm, int pid) {
-	struct process_info *pi = search_process_info(comm);
-	int h;
-	
-	// reuse process_info, to avoid kfree/kmalloc
-	if (pi) {
-		if (atomic_read(&pi->nthreads)) {
-			// must call reset_process_info before reusing
-			C_ASSERT(0);
-			printk(KERN_ERR "Duplicate process %s, %d", comm, pid);
-			return;
-		} else {
-			// successful reuse
-			printk("Reusing process %s, %d", comm, pid);
-			atomic_set(&pi->nthreads, 1);
-			pi->pids[0] = pid;
-			h = hash_32(pid, PID_HASH_BITS);
-			C_ASSERT(thread_list[h].pi == NULL);
-			thread_list[h].pi = pi;
-			thread_list[h].tid = 0;
-			return;
-		}
-	}
+	struct execution_arg *arg =
+		(struct execution_arg *) kmalloc(sizeof(*arg), GFP_KERNEL);
+	arg->comm = comm;
+	arg->pid = pid;
+	// kfree in _insert_process;
 
-	// cannot reuse and need allocate
-	pi = (struct process_info *)
-		kmalloc(sizeof(struct process_info), GFP_KERNEL);
-	C_ASSERT(pi != NULL);
-
-	// process/thread info
-	strcpy(pi->comm, comm);
-	atomic_set(&pi->nthreads, 1);
-	memset(pi->matrix, 0, sizeof(pi->matrix));
-	memset(pi->pids, -1, sizeof(pi->pids));
-	
-	// linked list
-	pi->pids[0] = pid;
-	INIT_LIST_HEAD(&pi->list);
-	list_add(&pi->list, &process_list.list);
-
-	// find process_info fast with pid
-	h = hash_32(pid, PID_HASH_BITS);
-	C_ASSERT(thread_list[h].pi == NULL);
-	thread_list[h].pi = pi;
-	thread_list[h].tid = 0;
-
-	// use vmalloc for large data block
-	pi->mcs = (struct mem_acc *) vmalloc(sizeof(struct mem_acc) << MEM_HASH_BITS);
-	C_ASSERT(pi->mcs);
-	memset(pi->mcs, -1, sizeof(struct mem_acc) << MEM_HASH_BITS);
-
-	pi->last_sum = 0;
-
-#ifdef C_PRINT
-	C_LOG(comm);
+#ifdef C_IPI
+	smp_call_function_single(SCHED_CORE, _insert_process,
+		(void *) arg, 1);
+#else
+	_insert_process(arg);
 #endif
 }
 
 static inline
 void insert_thread(char *comm, int pid) {
-	int h = hash_32(pid, PID_HASH_BITS);
-	short tid;
-	struct process_info *pi = search_process_info(comm);
+	struct execution_arg *arg =
+		(struct execution_arg *) kmalloc(sizeof(*arg), GFP_KERNEL);
+	arg->comm = comm;
+	arg->pid = pid;
+	// kfree in _insert_thread;
 
-	// threads must be inserted after process
-	if (!pi) {
-		C_ASSERT(pi != NULL);
-		printk(KERN_ERR "No process %s, %d", comm, pid);
-		return;
-	}
-
-	// thread_list is hash-based. Collision is possible
-	if (thread_list[h].pi) {
-		C_ASSERT(thread_list[h].pi == NULL);
-		printk("Thread hash collision %s, %d", comm, pid);
-		return;
-	}
-
-	// thread_list maps from ``hash(pid)`` to ``process_info & tid``
-	thread_list[h].pi = pi;
-	tid = atomic_inc_return(&pi->nthreads) - 1;
-
-	pi->pids[tid] = pid;
-	thread_list[h].tid = tid;
-
-#ifdef C_PRINT
-	C_LOG(comm);
+#ifdef C_IPI
+	smp_call_function_single(SCHED_CORE, _insert_thread,
+		(void *) arg, 1);
+#else
+	_insert_thread(arg);
 #endif
 }
 
 static inline
 void remove_thread(char *comm, int pid) {
-	int h = hash_32(pid, PID_HASH_BITS);
-	short tid;
-	struct process_info *pi = NULL;
-	struct list_head *curr;
-	
-	list_for_each(curr, &process_list.list) {
-		pi = list_entry(curr, struct process_info, list);
-		if (!strcmp(pi->comm, comm)) {
-			break;
-		}
-	}
+	struct execution_arg *arg =
+		(struct execution_arg *) kmalloc(sizeof(*arg), GFP_KERNEL);
+	arg->comm = comm;
+	arg->pid = pid;
+	// kfree in _remove_thread;
 
-	if (!pi) {
-		C_ASSERT(pi);
-		printk(KERN_ERR "No process %s, %d", comm, pid);
-		return;
-	}
-	if (!thread_list[h].pi) {
-		C_ASSERT(thread_list[h].pi);
-		printk(KERN_ERR "No process info %s, %d", comm, pid);
-		return;
-	}
-	
-	thread_list[h].pi = NULL;
-	thread_list[h].tid = -1;
-
-	tid = atomic_dec_return(&pi->nthreads);
-	if (unlikely(tid == 0)) {
-		reset_process_info(pi);
-	}
-
-#ifdef C_PRINT
-	C_LOG(comm);
+#ifdef C_IPI
+	smp_call_function_single(SCHED_CORE, _remove_thread,
+		(void *) arg, 1);
+#else
+	_remove_thread(arg);
 #endif
 }
 
@@ -280,59 +225,18 @@ void inc_matrix(int *matrix, int x, int y) {
 
 static inline
 void record_access(int pid, unsigned long address) {
-  int h = hash_32(pid, PID_HASH_BITS);
-  struct process_info *pi = thread_list[h].pi;
-  short tid = thread_list[h].tid;
-  struct mem_acc *mc;
+	struct access_arg *arg =
+		(struct access_arg *) kmalloc(sizeof(*arg), GFP_KERNEL);
+	arg->address = address;
+	arg->pid = pid;
+	// kfree in _record_access;
 
-	if (likely(!pi)) {
-		return;
-	}
-  mc = &pi->mcs[hash_32(PN(address), MEM_HASH_BITS)];
-
-  switch(get_nshare(mc)) {
-    case 0: {
-      mc->tids[0] = tid;
-			mc->pn = PN(address);
-      break;
-    }
-
-    case 1: {
-			if (unlikely(mc->pn != PN(address))) {
-				C_ASSERT(0);
-				printk(KERN_ERR "Address collision");
-				return;
-			}
-
-      if (mc->tids[0] != tid) {
-        mc->tids[1] = mc->tids[0];
-        mc->tids[0] = tid;
-        inc_matrix(pi->matrix, tid, mc->tids[1]);
-      }
-      break;
-    }
-
-    case 2: {
-			if (unlikely(mc->pn != PN(address))) {
-				C_ASSERT(0);
-				printk(KERN_ERR "Address collision");
-				return;
-			}
-
-      if (mc->tids[0] != tid) {
-        if (mc->tids[1] != tid) {
-          inc_matrix(pi->matrix, tid, mc->tids[0]);
-          inc_matrix(pi->matrix, tid, mc->tids[1]);
-        } else {
-          inc_matrix(pi->matrix, tid, mc->tids[0]);
-          mc->tids[1] = mc->tids[0];
-          mc->tids[0] = tid;
-        }
-      } else if (mc->tids[1] != tid) {
-        inc_matrix(pi->matrix, tid, mc->tids[1]);
-      }
-    }
-  } 
+#ifdef C_IPI
+	smp_call_function_single(SCHED_CORE, _record_access,
+		(void *) arg, 1);
+#else
+	_record_access(arg);
+#endif
 }
 
 
